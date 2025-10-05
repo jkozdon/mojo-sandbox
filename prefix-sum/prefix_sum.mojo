@@ -10,13 +10,14 @@ from memory import UnsafePointer, stack_allocation
 from testing import assert_equal
 
 alias int_type = DType.uint64
+alias block_check_type = DType.uint32
 alias BLOCK_DIM = 1024
 # alias layout = Layout.row_major(vector_size)
 
 fn prefix_sum(
     vector_size: Int,
     x: UnsafePointer[Scalar[int_type]],
-    y: UnsafePointer[Scalar[int_type]],
+    block_check: UnsafePointer[Scalar[block_check_type]],
 ):
     shared = stack_allocation[
         2 * BLOCK_DIM,
@@ -70,11 +71,13 @@ fn prefix_sum(
         if index < 2 * BLOCK_DIM:
             shared[index] += shared[index - stride]
         stride //= 2
+    prefix_sum = 0
+    # TODO: handle the case of multiple blocks using block_check
     barrier()
     if gid < vector_size:
-        y[gid] = shared[lid]
+        x[gid] = shared[lid] + prefix_sum
     if gid + BLOCK_DIM < vector_size:
-        y[gid + BLOCK_DIM] = shared[lid + BLOCK_DIM]
+        x[gid + BLOCK_DIM] = shared[lid + BLOCK_DIM] + prefix_sum
 
 
 def main():
@@ -102,22 +105,23 @@ def main():
         seed(88)
         for i in range(vector_size):
             h_x[i] = random_ui64(0, 255).cast[int_type]()
-            h_y[i] = i
 
         d_x = ctx.enqueue_create_buffer[int_type](vector_size)
         ctx.enqueue_copy(dst_buf=d_x, src_buf=h_x)
-        d_y = ctx.enqueue_create_buffer[int_type](vector_size)
 
-        grid_dim = BLOCK_DIM * ((vector_size + 2 * BLOCK_DIM - 1) // (2*BLOCK_DIM))
+        num_blocks = (vector_size + 2 * BLOCK_DIM - 1) // (2*BLOCK_DIM)
+        grid_dim = BLOCK_DIM * num_blocks
+        d_block_check = ctx.enqueue_create_buffer[block_check_type](num_blocks).enqueue_fill(0)
+
         ctx.enqueue_function[prefix_sum](
             vector_size,
             d_x.unsafe_ptr(),
-            d_y.unsafe_ptr(),
+            d_block_check.unsafe_ptr(),
             grid_dim=grid_dim,
             block_dim=BLOCK_DIM,
         )
 
-        ctx.enqueue_copy(dst_buf=h_y, src_buf=d_y)
+        ctx.enqueue_copy(dst_buf=h_y, src_buf=d_x)
         ctx.synchronize()
 
         sum = 0 * h_x[0]
