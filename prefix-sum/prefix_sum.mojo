@@ -3,6 +3,7 @@ from sys import arg
 from gpu.host import DeviceContext
 from gpu import block_dim, block_idx, thread_idx, barrier
 from gpu.memory import AddressSpace
+from gpu.intrinsics import store_release
 from sys import has_accelerator
 from random import random_ui64, seed
 from layout import Layout, LayoutTensor
@@ -10,7 +11,7 @@ from memory import UnsafePointer, stack_allocation
 from testing import assert_equal
 
 alias int_type = DType.uint64
-alias block_check_type = DType.uint32
+alias block_check_type = DType.uint8
 alias BLOCK_DIM = 1024
 # alias layout = Layout.row_major(vector_size)
 
@@ -18,6 +19,8 @@ fn prefix_sum(
     vector_size: Int,
     x: UnsafePointer[Scalar[int_type]],
     block_check: UnsafePointer[Scalar[block_check_type]],
+    block_sum: UnsafePointer[Scalar[int_type]],
+    block_prefix_sum: UnsafePointer[Scalar[int_type]],
 ):
     shared = stack_allocation[
         2 * BLOCK_DIM,
@@ -38,6 +41,7 @@ fn prefix_sum(
         shared[lid + BLOCK_DIM] = 0
 
     stride = 1
+    # forward sweep
     while stride < 2 * BLOCK_DIM:
         # stride = 1, lid = 0: 2 * 1 * (0 + 1) - 1 =  1
         # stride = 2, lid = 0: 2 * 2 * (0 + 1) - 1 =  3
@@ -64,6 +68,7 @@ fn prefix_sum(
             shared[index] += shared[index - stride]
         stride *= 2
 
+    # Reverse sweep
     stride = (2 * BLOCK_DIM) // 4
     while stride > 0:
         barrier()
@@ -71,13 +76,17 @@ fn prefix_sum(
         if index < 2 * BLOCK_DIM:
             shared[index] += shared[index - stride]
         stride //= 2
-    prefix_sum = 0
+
+    # publish block sum
+    if lid == 0:
+        block_sum[bid] = shared[2 * BLOCK_DIM - 1]
+        store_release(block_check + bid, 1)
+
     # TODO: handle the case of multiple blocks using block_check
-    barrier()
     if gid < vector_size:
-        x[gid] = shared[lid] + prefix_sum
+        x[gid] = shared[lid]# + prefix_sum
     if gid + BLOCK_DIM < vector_size:
-        x[gid + BLOCK_DIM] = shared[lid + BLOCK_DIM] + prefix_sum
+        x[gid + BLOCK_DIM] = shared[lid + BLOCK_DIM]# + prefix_sum
 
 
 def main():
@@ -112,11 +121,15 @@ def main():
         num_blocks = (vector_size + 2 * BLOCK_DIM - 1) // (2*BLOCK_DIM)
         grid_dim = BLOCK_DIM * num_blocks
         d_block_check = ctx.enqueue_create_buffer[block_check_type](num_blocks).enqueue_fill(0)
+        d_block_sum = ctx.enqueue_create_buffer[int_type](num_blocks)
+        d_block_prefix_sum = ctx.enqueue_create_buffer[int_type](num_blocks)
 
         ctx.enqueue_function[prefix_sum](
             vector_size,
             d_x.unsafe_ptr(),
             d_block_check.unsafe_ptr(),
+            d_block_sum.unsafe_ptr(),
+            d_block_prefix_sum.unsafe_ptr(),
             grid_dim=grid_dim,
             block_dim=BLOCK_DIM,
         )
