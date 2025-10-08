@@ -14,6 +14,20 @@ alias int_type = DType.uint64
 alias BLOCK_DIM = 128
 # alias layout = Layout.row_major(vector_size)
 
+fn block_sum_propogate(
+    vector_size: Int,
+    x: UnsafePointer[Scalar[int_type]],
+    block_sum: UnsafePointer[Scalar[int_type]],
+):
+    var bid = block_idx.x
+    var lid = thread_idx.x
+    var gid = 2 * BLOCK_DIM * bid + lid
+    prev_sum = block_sum[bid - 1]
+    if gid < vector_size:
+        x[gid] += prev_sum
+    if gid + BLOCK_DIM < vector_size:
+        x[gid + BLOCK_DIM] += prev_sum
+
 fn prefix_sum(
     vector_size: Int,
     x: UnsafePointer[Scalar[int_type]],
@@ -24,11 +38,13 @@ fn prefix_sum(
         address_space = AddressSpace.SHARED,
     ]()
 
-    var bid = block_idx.x
+    # There should only be 1 block...
+    if block_idx.x > 0:
+        return
     var lid = thread_idx.x
     var block_index = 0
     var prev_sum = Scalar[int_type](0)
-    var gid = 2 * BLOCK_DIM * bid + lid
+    var gid = lid
     while block_index < vector_size:
         if gid < vector_size:
             shared[lid] = x[gid]
@@ -108,6 +124,10 @@ fn prefix_block_sum(
 
     if lid == 0:
         block_sum[bid] = shared[2 * BLOCK_DIM - 1]
+    if gid < vector_size:
+        x[gid] = shared[lid]
+    if gid < vector_size + BLOCK_DIM:
+        x[gid + BLOCK_DIM] = shared[lid + BLOCK_DIM]
 
 def main():
 
@@ -142,17 +162,25 @@ def main():
         grid_dim = BLOCK_DIM * num_blocks
         d_block_sum = ctx.enqueue_create_buffer[int_type](num_blocks)
 
-        # ctx.enqueue_function[prefix_block_sum](
-        #     vector_size,
-        #     d_x.unsafe_ptr(),
-        #     d_block_sum.unsafe_ptr(),
-        #     grid_dim=grid_dim,
-        #     block_dim=BLOCK_DIM,
-        # )
-
-        ctx.enqueue_function[prefix_sum](
+        ctx.enqueue_function[prefix_block_sum](
             vector_size,
             d_x.unsafe_ptr(),
+            d_block_sum.unsafe_ptr(),
+            grid_dim=grid_dim,
+            block_dim=BLOCK_DIM,
+        )
+
+        ctx.enqueue_function[prefix_sum](
+            num_blocks,
+            d_block_sum.unsafe_ptr(),
+            grid_dim=BLOCK_DIM,
+            block_dim=BLOCK_DIM,
+        )
+
+        ctx.enqueue_function[block_sum_propogate](
+            vector_size,
+            d_x.unsafe_ptr(),
+            d_block_sum.unsafe_ptr(),
             grid_dim=grid_dim,
             block_dim=BLOCK_DIM,
         )
@@ -160,10 +188,10 @@ def main():
         ctx.enqueue_copy(dst_buf=h_y, src_buf=d_x)
         ctx.synchronize()
 
-        sum = Scalar[int_type](0)
-        for i in range(vector_size):
-            sum += h_x[i]
-            print(i, h_x[i], h_y[i], sum)
+        # sum = Scalar[int_type](0)
+        # for i in range(vector_size):
+        #     sum += h_x[i]
+        #     print(i, h_x[i], h_y[i], sum)
         sum = Scalar[int_type](0)
         for i in range(vector_size):
             sum += h_x[i]
