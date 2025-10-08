@@ -159,21 +159,20 @@ def main():
         ctx.enqueue_copy(dst_buf=d_x, src_buf=h_x)
 
         num_blocks = (vector_size + 2 * BLOCK_DIM - 1) // (2*BLOCK_DIM)
-        grid_dim = BLOCK_DIM * num_blocks
         d_block_sum = ctx.enqueue_create_buffer[int_type](num_blocks)
 
         ctx.enqueue_function[prefix_block_sum](
             vector_size,
             d_x.unsafe_ptr(),
             d_block_sum.unsafe_ptr(),
-            grid_dim=grid_dim,
+            grid_dim=num_blocks,
             block_dim=BLOCK_DIM,
         )
 
         ctx.enqueue_function[prefix_sum](
             num_blocks,
             d_block_sum.unsafe_ptr(),
-            grid_dim=BLOCK_DIM,
+            grid_dim=1,
             block_dim=BLOCK_DIM,
         )
 
@@ -181,7 +180,7 @@ def main():
             vector_size,
             d_x.unsafe_ptr(),
             d_block_sum.unsafe_ptr(),
-            grid_dim=grid_dim,
+            grid_dim=num_blocks,
             block_dim=BLOCK_DIM,
         )
 
